@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: boyuan-health-bridge
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install .
+    startCommand: uvicorn app.server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.11
+      - key: OWNER_SECRET
+        sync: false
+      - key: OAUTH_SIGNING_SECRET
+        generateValue: true
