@@ -1,3 +1,5 @@
+from datetime import date
+
 import pytest
 from pydantic import BaseModel
 
@@ -62,6 +64,38 @@ class UnknownShapeClient:
         return []
 
 
+class Snapshot(BaseModel):
+    updated_time: int
+
+
+class Summary(BaseModel):
+    date: str
+
+
+class SnapshotClient:
+    async def get_relatives(self):
+        return [
+            Member(
+                relative_uid=42,
+                relative_note="小叶",
+                latest_data_time=1786557871,
+            )
+        ]
+
+    async def get_latest_data(self, relative_uid):
+        assert relative_uid == 42
+        return Snapshot(updated_time=1786557871)
+
+    async def get_daily_summary(self, relative_uid, query_date):
+        assert relative_uid == 42
+        assert query_date == date(2026, 8, 13)
+        return Summary(date=query_date.isoformat())
+
+    async def get_shared_data_types(self, relative_uid):
+        assert relative_uid == 42
+        return ["heart_rate", "sleep"]
+
+
 async def test_resolve_single_relative_and_history() -> None:
     bridge = HealthBridge("synthetic")
     bridge._client = FakeClient()
@@ -106,3 +140,13 @@ async def test_unknown_shape_returns_safe_diagnostic_only() -> None:
     assert "mystery" in message
     assert "opaque" in message
     assert "secret-value" not in message
+
+
+async def test_snapshot_bypasses_upstream_relative_lookup_and_uses_xiaomi_timezone() -> None:
+    bridge = HealthBridge("synthetic")
+    bridge._client = SnapshotClient()
+
+    result = await bridge.snapshot("小叶")
+
+    assert result["daily_summary"] == {"date": "2026-08-13"}
+    assert result["shared_data_types"] == ["heart_rate", "sleep"]

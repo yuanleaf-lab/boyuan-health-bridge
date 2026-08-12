@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 
 from mi_fitness import AuthToken, MiHealthClient, XiaomiAuth
@@ -40,6 +40,7 @@ _RELATIVE_UID_KEYS = (
     "userId",
     "uid",
 )
+_XIAOMI_TIMEZONE = timezone(timedelta(hours=8))
 
 
 class RelativeMember(BaseModel):
@@ -315,7 +316,13 @@ class HealthBridge:
         client = self._get_client()
         member = await self.resolve_relative(relative)
         snapshot = await client.get_latest_data(member.relative_uid)
-        summary = await client.get_latest_daily_summary(member.relative_uid)
+        latest_time = member.latest_data_time or snapshot.updated_time
+        query_date = (
+            datetime.fromtimestamp(latest_time, tz=_XIAOMI_TIMEZONE).date()
+            if latest_time > 0
+            else date.today()
+        )
+        summary = await client.get_daily_summary(member.relative_uid, query_date)
         shared = await client.get_shared_data_types(member.relative_uid)
         return {
             "relative": member.model_dump(mode="json"),
