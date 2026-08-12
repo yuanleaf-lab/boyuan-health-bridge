@@ -5,6 +5,8 @@ from datetime import date
 from typing import Any, Literal
 
 from mi_fitness import AuthToken, MiHealthClient, XiaomiAuth
+from mi_fitness.const import RELATIVES_LIST_PATH
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 Metric = Literal[
     "heart_rate",
@@ -17,6 +19,168 @@ Metric = Literal[
     "weight",
     "blood_pressure",
 ]
+
+_RELATIVE_LIST_KEYS = (
+    "relative_list",
+    "relativeList",
+    "relatives",
+    "family_user_list",
+    "familyUserList",
+    "member_list",
+    "memberList",
+    "list",
+    "data",
+)
+_RELATIVE_UID_KEYS = (
+    "relative_uid",
+    "relativeUid",
+    "relative_user_id",
+    "relativeUserId",
+    "user_id",
+    "userId",
+    "uid",
+)
+
+
+class RelativeMember(BaseModel):
+    """Bridge-owned relative model tolerant of Xiaomi response changes."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    relative_uid: int
+    relative_note: str = ""
+    relative_icon: str = ""
+    latest_data_time: int = 0
+    latest_abnormal_record_time: int | None = 0
+    source_tag: int = 0
+
+
+def _decode_json_value(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _pick(item: dict[str, Any], keys: tuple[str, ...], default: Any = None) -> Any:
+    for key in keys:
+        value = item.get(key)
+        if value is not None:
+            return value
+    return default
+
+
+def _looks_like_relative(item: dict[str, Any]) -> bool:
+    return any(item.get(key) is not None for key in _RELATIVE_UID_KEYS)
+
+
+def _extract_relative_items(value: Any, *, depth: int = 0) -> list[dict[str, Any]]:
+    """Find relative records in known and lightly nested Xiaomi response shapes."""
+
+    value = _decode_json_value(value)
+    if depth > 4:
+        return []
+    if isinstance(value, list):
+        decoded = [_decode_json_value(item) for item in value]
+        direct = [item for item in decoded if isinstance(item, dict) and _looks_like_relative(item)]
+        if direct:
+            return direct
+        for item in decoded:
+            nested = _extract_relative_items(item, depth=depth + 1)
+            if nested:
+                return nested
+        return []
+    if not isinstance(value, dict):
+        return []
+    if _looks_like_relative(value):
+        return [value]
+    for key in _RELATIVE_LIST_KEYS:
+        if key in value:
+            nested = _extract_relative_items(value[key], depth=depth + 1)
+            if nested:
+                return nested
+    for nested_value in value.values():
+        nested = _extract_relative_items(nested_value, depth=depth + 1)
+        if nested:
+            return nested
+    return []
+
+
+def _normalize_relative(item: dict[str, Any]) -> RelativeMember | None:
+    merged = dict(item)
+    for key in ("user_info", "userInfo", "profile", "relative_info", "relativeInfo"):
+        nested = _decode_json_value(item.get(key))
+        if isinstance(nested, dict):
+            merged = {**nested, **merged}
+
+    normalized = {
+        "relative_uid": _pick(merged, _RELATIVE_UID_KEYS),
+        "relative_note": _pick(
+            merged,
+            ("relative_note", "relativeNote", "relation_note", "note", "nickname", "nick_name", "name"),
+            "",
+        ),
+        "relative_icon": _pick(
+            merged,
+            ("relative_icon", "relativeIcon", "icon", "avatar", "avatar_url", "avatarUrl"),
+            "",
+        ),
+        "latest_data_time": _pick(
+            merged,
+            ("latest_data_time", "latestDataTime", "data_time", "latest_update_time", "updateTime"),
+            0,
+        ),
+        "latest_abnormal_record_time": _pick(
+            merged,
+            ("latest_abnormal_record_time", "latestAbnormalRecordTime"),
+            0,
+        ),
+        "source_tag": _pick(merged, ("source_tag", "sourceTag"), 0),
+    }
+    try:
+        return RelativeMember.model_validate(normalized)
+    except ValidationError:
+        return None
+
+
+def _parse_relatives(value: Any) -> list[RelativeMember]:
+    members: list[RelativeMember] = []
+    seen: set[int] = set()
+    for item in _extract_relative_items(value):
+        member = _normalize_relative(item)
+        if member and member.relative_uid not in seen:
+            seen.add(member.relative_uid)
+            members.append(member)
+    return members
+
+
+def _safe_shape(value: Any, *, depth: int = 0) -> dict[str, Any]:
+    """Describe response structure without exposing IDs, names, or health data."""
+
+    value = _decode_json_value(value)
+    if depth > 3:
+        return {"type": type(value).__name__}
+    if isinstance(value, dict):
+        keys = sorted(str(key) for key in value)
+        return {
+            "type": "dict",
+            "keys": keys,
+            "children": {
+                str(key): _safe_shape(child, depth=depth + 1)
+                for key, child in value.items()
+                if isinstance(_decode_json_value(child), (dict, list))
+            },
+        }
+    if isinstance(value, list):
+        summary: dict[str, Any] = {"type": "list", "length": len(value)}
+        if value:
+            first = _decode_json_value(value[0])
+            if isinstance(first, dict):
+                summary["item_keys"] = sorted(str(key) for key in first)
+        return summary
+    return {"type": type(value).__name__}
 
 
 class HealthBridge:
@@ -59,12 +223,43 @@ class HealthBridge:
         self._client = MiHealthClient(auth)
         return self._client
 
+    async def _get_relatives(self) -> list[Any]:
+        client = self._get_client()
+        members = await client.get_relatives()
+        if members:
+            return members
+
+        raw = await client._request("GET", RELATIVES_LIST_PATH)
+        members = _parse_relatives(raw)
+        if members:
+            return members
+
+        family_result: Any = []
+        family_error: str | None = None
+        try:
+            family_result = await client.get_family_members()
+            members = _parse_relatives(family_result)
+            if members:
+                return members
+        except Exception as exc:  # pragma: no cover - depends on Xiaomi endpoint behavior
+            family_error = type(exc).__name__
+
+        diagnostic = {
+            "relative_response": _safe_shape(raw),
+            "family_response": _safe_shape(family_result),
+            "family_error": family_error,
+        }
+        raise RuntimeError(
+            "小米接口已响应，但亲友数据结构无法识别。安全诊断："
+            + json.dumps(diagnostic, ensure_ascii=False, separators=(",", ":"))
+        )
+
     async def list_relatives(self) -> list[dict[str, Any]]:
-        members = await self._get_client().get_relatives()
+        members = await self._get_relatives()
         return [member.model_dump(mode="json") for member in members]
 
     async def resolve_relative(self, relative: str | None) -> Any:
-        members = await self._get_client().get_relatives()
+        members = await self._get_relatives()
         if relative:
             lowered = relative.strip().lower()
             for member in members:
