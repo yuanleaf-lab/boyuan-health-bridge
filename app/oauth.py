@@ -104,7 +104,17 @@ class BridgeOAuthProvider(
                 return None
             if metadata.get("client_id") not in (None, client_id):
                 return None
-            if metadata.get("token_endpoint_auth_method", "none") != "none":
+            # ChatGPT's CIMD currently declares private_key_jwt as its preferred
+            # method while also advertising that it supports the public-client
+            # `none` method. This bridge only supports authorization-code + PKCE
+            # public clients, so accept the document when the supported-methods
+            # intersection contains `none` and normalize the stored client to it.
+            supported_methods = metadata.get("token_endpoint_auth_methods_supported")
+            if isinstance(supported_methods, list):
+                supports_none = "none" in supported_methods
+            else:
+                supports_none = metadata.get("token_endpoint_auth_method", "none") == "none"
+            if not supports_none:
                 return None
             client = OAuthClientInformationFull(
                 client_id=client_id,
