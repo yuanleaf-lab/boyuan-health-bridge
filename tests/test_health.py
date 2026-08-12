@@ -39,6 +39,8 @@ class RawShapeClient:
                             "userId": "42",
                             "nickname": "小叶",
                             "latestDataTime": 123,
+                            "latestAbnormalRecordTime": "",
+                            "sourceTag": {},
                         }
                     ]
                 }

@@ -72,6 +72,22 @@ def _pick(item: dict[str, Any], keys: tuple[str, ...], default: Any = None) -> A
     return default
 
 
+def _coerce_int(value: Any, *, default: int | None = 0) -> int | None:
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError, OverflowError):
+            return default
+
+
+def _coerce_text(value: Any) -> str:
+    return value if isinstance(value, str) else ""
+
+
 def _looks_like_relative(item: dict[str, Any]) -> bool:
     return any(item.get(key) is not None for key in _RELATIVE_UID_KEYS)
 
@@ -115,29 +131,48 @@ def _normalize_relative(item: dict[str, Any]) -> RelativeMember | None:
         if isinstance(nested, dict):
             merged = {**nested, **merged}
 
+    relative_uid = _coerce_int(_pick(merged, _RELATIVE_UID_KEYS), default=None)
+    if relative_uid is None:
+        return None
     normalized = {
-        "relative_uid": _pick(merged, _RELATIVE_UID_KEYS),
-        "relative_note": _pick(
-            merged,
-            ("relative_note", "relativeNote", "relation_note", "note", "nickname", "nick_name", "name"),
-            "",
+        "relative_uid": relative_uid,
+        "relative_note": _coerce_text(
+            _pick(
+                merged,
+                (
+                    "relative_note",
+                    "relativeNote",
+                    "relation_note",
+                    "note",
+                    "nickname",
+                    "nick_name",
+                    "name",
+                ),
+                "",
+            )
         ),
-        "relative_icon": _pick(
-            merged,
-            ("relative_icon", "relativeIcon", "icon", "avatar", "avatar_url", "avatarUrl"),
-            "",
+        "relative_icon": _coerce_text(
+            _pick(
+                merged,
+                ("relative_icon", "relativeIcon", "icon", "avatar", "avatar_url", "avatarUrl"),
+                "",
+            )
         ),
-        "latest_data_time": _pick(
-            merged,
-            ("latest_data_time", "latestDataTime", "data_time", "latest_update_time", "updateTime"),
-            0,
+        "latest_data_time": _coerce_int(
+            _pick(
+                merged,
+                ("latest_data_time", "latestDataTime", "data_time", "latest_update_time", "updateTime"),
+                0,
+            )
         ),
-        "latest_abnormal_record_time": _pick(
-            merged,
-            ("latest_abnormal_record_time", "latestAbnormalRecordTime"),
-            0,
+        "latest_abnormal_record_time": _coerce_int(
+            _pick(
+                merged,
+                ("latest_abnormal_record_time", "latestAbnormalRecordTime"),
+                0,
+            )
         ),
-        "source_tag": _pick(merged, ("source_tag", "sourceTag"), 0),
+        "source_tag": _coerce_int(_pick(merged, ("source_tag", "sourceTag"), 0)),
     }
     try:
         return RelativeMember.model_validate(normalized)
